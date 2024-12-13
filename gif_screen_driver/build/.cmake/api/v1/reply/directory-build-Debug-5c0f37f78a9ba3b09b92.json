@@ -1,0 +1,14 @@
+{
+	"backtraceGraph" : 
+	{
+		"commands" : [],
+		"files" : [],
+		"nodes" : []
+	},
+	"installers" : [],
+	"paths" : 
+	{
+		"build" : "build",
+		"source" : "M:/house-projects/Christmas/display-screen-ws2812b/FatFs_SPI"
+	}
+}

@@ -1,0 +1,15 @@
+{
+    "C_Cpp.default.compilerPath": "c:\\VSARM\\mingw\\mingw64\\bin\\gcc.exe",
+    "cSpell.words": [
+        "dreq",
+        "FILINFO",
+        "PICO"
+    ],
+    "cSpell.ignoreWords": [
+        "CPHA"
+    ],
+    "files.associations": {
+        "i2c.h": "c",
+        "ssd1306.h": "c"
+    }
+}

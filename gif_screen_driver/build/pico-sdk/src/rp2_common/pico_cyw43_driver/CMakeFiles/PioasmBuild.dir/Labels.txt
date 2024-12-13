@@ -1,0 +1,13 @@
+# Target labels
+ PioasmBuild
+# Source files and their labels
+M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/pico-sdk/src/rp2_common/pico_cyw43_driver/CMakeFiles/PioasmBuild
+M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/pico-sdk/src/rp2_common/pico_cyw43_driver/CMakeFiles/PioasmBuild.rule
+M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/pico-sdk/src/rp2_common/pico_cyw43_driver/CMakeFiles/PioasmBuild-complete.rule
+M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/pico-sdk/src/rp2_common/pico_cyw43_driver/pioasm/src/PioasmBuild-stamp/PioasmBuild-build.rule
+M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/pico-sdk/src/rp2_common/pico_cyw43_driver/pioasm/src/PioasmBuild-stamp/PioasmBuild-configure.rule
+M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/pico-sdk/src/rp2_common/pico_cyw43_driver/pioasm/src/PioasmBuild-stamp/PioasmBuild-download.rule
+M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/pico-sdk/src/rp2_common/pico_cyw43_driver/pioasm/src/PioasmBuild-stamp/PioasmBuild-install.rule
+M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/pico-sdk/src/rp2_common/pico_cyw43_driver/pioasm/src/PioasmBuild-stamp/PioasmBuild-mkdir.rule
+M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/pico-sdk/src/rp2_common/pico_cyw43_driver/pioasm/src/PioasmBuild-stamp/PioasmBuild-patch.rule
+M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/pico-sdk/src/rp2_common/pico_cyw43_driver/pioasm/src/PioasmBuild-stamp/PioasmBuild-update.rule

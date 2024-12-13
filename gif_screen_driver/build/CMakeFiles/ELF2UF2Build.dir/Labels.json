@@ -1,0 +1,43 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/CMakeFiles/ELF2UF2Build"
+		},
+		{
+			"file" : "M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/CMakeFiles/ELF2UF2Build.rule"
+		},
+		{
+			"file" : "M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/CMakeFiles/ELF2UF2Build-complete.rule"
+		},
+		{
+			"file" : "M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/elf2uf2/src/ELF2UF2Build-stamp/ELF2UF2Build-build.rule"
+		},
+		{
+			"file" : "M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/elf2uf2/src/ELF2UF2Build-stamp/ELF2UF2Build-configure.rule"
+		},
+		{
+			"file" : "M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/elf2uf2/src/ELF2UF2Build-stamp/ELF2UF2Build-download.rule"
+		},
+		{
+			"file" : "M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/elf2uf2/src/ELF2UF2Build-stamp/ELF2UF2Build-install.rule"
+		},
+		{
+			"file" : "M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/elf2uf2/src/ELF2UF2Build-stamp/ELF2UF2Build-mkdir.rule"
+		},
+		{
+			"file" : "M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/elf2uf2/src/ELF2UF2Build-stamp/ELF2UF2Build-patch.rule"
+		},
+		{
+			"file" : "M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/elf2uf2/src/ELF2UF2Build-stamp/ELF2UF2Build-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"ELF2UF2Build"
+		],
+		"name" : "ELF2UF2Build"
+	}
+}

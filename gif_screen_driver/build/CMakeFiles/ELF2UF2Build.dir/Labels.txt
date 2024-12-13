@@ -1,0 +1,13 @@
+# Target labels
+ ELF2UF2Build
+# Source files and their labels
+M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/CMakeFiles/ELF2UF2Build
+M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/CMakeFiles/ELF2UF2Build.rule
+M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/CMakeFiles/ELF2UF2Build-complete.rule
+M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/elf2uf2/src/ELF2UF2Build-stamp/ELF2UF2Build-build.rule
+M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/elf2uf2/src/ELF2UF2Build-stamp/ELF2UF2Build-configure.rule
+M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/elf2uf2/src/ELF2UF2Build-stamp/ELF2UF2Build-download.rule
+M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/elf2uf2/src/ELF2UF2Build-stamp/ELF2UF2Build-install.rule
+M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/elf2uf2/src/ELF2UF2Build-stamp/ELF2UF2Build-mkdir.rule
+M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/elf2uf2/src/ELF2UF2Build-stamp/ELF2UF2Build-patch.rule
+M:/house-projects/Christmas/display-screen-ws2812b/gif_screen_driver/build/elf2uf2/src/ELF2UF2Build-stamp/ELF2UF2Build-update.rule
