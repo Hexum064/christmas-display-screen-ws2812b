@@ -1,0 +1,713 @@
+#include <stdio.h>
+#include <stdlib.h>
+//
+#include "f_util.h"
+#include "ff.h"
+#include "pico/stdlib.h"
+#include "hardware/dma.h"
+#include "hardware/spi.h"
+#include "pico/multicore.h"
+#include "hardware/i2c.h"
+
+#include "ssd1306.h"
+
+#include "hw_config.h"
+#include <string.h>
+#include "gifdec.h"
+
+
+//Generate frame
+//Shift MSB of each current byte of 48 scan lines into 6 bytes, bottom first
+//--bottom first means, the first bit to go out over spi will be the MSB of the 48th line's current byte
+//Output, via spi1, all 1s for 6 bytes  (48 bits worth);
+//Output, via spi1, the 6 bytes that the actual data was shifted into
+//Pulse clear pin to reset to 0's
+//--next set of bits should be shifted in right after this as the next data should go out within about 200ns
+
+//for frame decoding, when gif is loaded, create 2 frame buffers, w*48*3 in size.
+//--the image will always be shown at the top of the screen. Making the buffer 48 in height makes
+//--it easier to output (there will always be 48 lines)
+//--the number of bytes to output per line will always be size/48
+//Calculate the number of bytes that need to be output to center the image based on w.
+//--these bytes will be output x number of times to center the image before the frame buffer is output
+//Clear the screen
+//--have a function that outputs 48*80 bytes of 0
+//When calling the screen output function, pass the pointer to the frame buffer.
+
+//let the second core handle the output
+//The assumption is that one frame will always be able to be output faster than the next frame will be ready
+//Min time between frames for a gif is 10ms
+//max time to output a frame is: (80(w)*48(h)*3(rgb)*8(bits)) = 92160 bits to output
+//--48 bits will be output via spi at 24mhz. A pattern of all 1's the the actual data will be output. 
+//look to the output_column function for the output pattern
+
+#define PICO_CLK_KHZ 133000UL 
+#define FRAME_ALARM_MS 1000 //TODO: change back to 10
+#define FRAME_OUTPUT_BAUD 24000000 //TODO: change back to 24000000UL
+
+#define SPI1_SCK_GPIO 10
+#define SPI1_MOSI_GPIO 11
+#define SPI1_MISO_GPIO 8 //probably not going to be used
+
+#define SHIFT_LATCH_GPIO 9
+#define SHIFT_OE_GPIO 8
+#define BUFF_OE_GPIO 12
+#define BUFF_S_GPIO 13
+
+#define DISP_SDA 2
+#define DISP_SCL 3
+#define DISP_I2C_FREQ 400000
+
+#define SCREEN_ROWS 48
+#define GIF_CYCLE_MS 30000 //(30s)
+
+#define DEBUG
+
+uint32_t oe_s_mask = (1 << SHIFT_OE_GPIO) | (1 << BUFF_OE_GPIO) | (1 << BUFF_S_GPIO);
+uint32_t buff_oe_lo = (1 << SHIFT_OE_GPIO) | (0 << BUFF_OE_GPIO) | (0 << BUFF_S_GPIO);
+uint32_t buff_oe_hi = (1 << SHIFT_OE_GPIO) | (0 << BUFF_OE_GPIO) | (1 << BUFF_S_GPIO);
+uint32_t shift_oe = (0 << SHIFT_OE_GPIO) | (1 << BUFF_OE_GPIO) | (0 << BUFF_S_GPIO);
+
+ssd1306_t disp;
+
+alarm_pool_t *core_0_alarm;
+repeating_timer_t frame_alarm;
+
+uint8_t * frame_buff_0 = 0;
+uint8_t * frame_buff_1 = 0;
+uint8_t * output_buff = 0;
+uint8_t * fill_buff = 0;
+
+
+uint8_t * col_data = 0;
+uint8_t all_on_col_data[] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+uint8_t frame_col_data[6] = {0};
+
+uint16_t frame_delay_count = 0xFFFF;
+uint16_t gif_cycle_count = 0;
+
+
+uint spi1_dma_channel;
+dma_channel_config spi1_dma_config;
+gd_GIF * cur_gif = 0;
+
+FIL fp;
+DIR dir;
+FILINFO fno;
+
+bool process_next_frame = false;
+
+//Handles:
+//  outputting a frame based on frame delay
+//  counting how many seconds a gif has been playing, so to signal next gif
+//  debouncing the "next gif" button
+bool frame_alarm_cb(repeating_timer_t * fa);
+
+inline void sleep_100ns()
+{
+    //@133mHz, each clock is 7.52ns
+    //13 nops = 13 * 7.52 = 97.8ns
+    __asm volatile ("nop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\n");
+   
+}
+
+inline void sleep_40ns()
+{
+    //@133mHz, each clock is 7.52ns
+    //13 nops = 5 * 7.52 = 37.6ns
+    __asm volatile ("nop\nnop\nnop\nnop\nnop\n");
+   
+}
+
+void alarm_init()
+{
+    #ifdef DEBUG
+    printf("Alarm initializing\n");
+#endif
+    core_0_alarm = alarm_pool_create_with_unused_hardware_alarm(1);
+    alarm_pool_add_repeating_timer_ms(core_0_alarm, FRAME_ALARM_MS, &frame_alarm_cb, 0, &frame_alarm);
+}
+
+void io_init()
+{
+    // Initialize Latch pin low
+    gpio_init(SHIFT_LATCH_GPIO);
+    gpio_set_dir(SHIFT_LATCH_GPIO, GPIO_OUT);
+    gpio_put(SHIFT_LATCH_GPIO, 0);
+
+    //Initialize OE pin high
+    gpio_init(SHIFT_OE_GPIO);
+    gpio_set_dir(SHIFT_OE_GPIO, GPIO_OUT);
+    gpio_put(SHIFT_OE_GPIO, 0);
+
+    gpio_init(BUFF_OE_GPIO);
+    gpio_set_dir(BUFF_OE_GPIO, GPIO_OUT);
+    gpio_put(BUFF_OE_GPIO, 1);
+
+    gpio_init(BUFF_S_GPIO);
+    gpio_set_dir(BUFF_S_GPIO, GPIO_OUT);
+    gpio_put(BUFF_S_GPIO, 0);
+
+    
+    //TODO: Init "next button" pin
+}
+
+void spi1_init()
+{
+    spi_init(spi1, FRAME_OUTPUT_BAUD);
+    spi_set_format(spi1, 8, SPI_CPOL_0 , SPI_CPHA_0, SPI_MSB_FIRST);
+    spi_set_slave(spi1, false);
+
+    // Initialize SPI pins
+    gpio_set_function(SPI1_SCK_GPIO, GPIO_FUNC_SPI);
+    gpio_set_function(SPI1_MOSI_GPIO, GPIO_FUNC_SPI);
+    // gpio_set_function(SPI1_MISO_GPIO, GPIO_FUNC_SPI); //don't need input
+
+
+
+}
+
+void spi1_dma_init()
+{
+    spi1_dma_channel = dma_claim_unused_channel(true);
+    spi1_dma_config = dma_channel_get_default_config(spi1_dma_channel);
+    channel_config_set_transfer_data_size(&spi1_dma_config, DMA_SIZE_8);
+    channel_config_set_read_increment(&spi1_dma_config, true);
+    channel_config_set_write_increment(&spi1_dma_config, false);
+    channel_config_set_dreq(&spi1_dma_config, DREQ_SPI1_TX);
+    // dma_channel_configure(spi1_dma_channel, &spi1_dma_config, &spi1_hw->dr, col_data, 6, false);
+}
+
+void display_i2c_init()
+{
+    i2c_init(i2c1, DISP_I2C_FREQ);
+    gpio_set_function(DISP_SDA, GPIO_FUNC_I2C);
+    gpio_set_function(DISP_SCL, GPIO_FUNC_I2C);
+    gpio_pull_up(DISP_SDA);
+    gpio_pull_up(DISP_SCL);
+}
+
+void display_init()
+{
+    disp.external_vcc=false;
+    ssd1306_init(&disp, 128, 32, 0x3C, i2c1);
+    ssd1306_clear(&disp);    
+}
+
+
+//The ws2812b timing is about 250-300ns hi, 250-300ns hi/low (actual data), 300-1000ns low
+//To achieve this, all 48 bits will be sent out via spi. The spi should be running at 24mHz
+//--24mHz = 0.00000004.17s (41.7ns). Each 48 bits (1 per row) will take at least 2000ns (more realistically 2500ns)
+//Pattern: 
+//--output spi
+//--Buff_S = 1 (all at same time) (Buff_OE should be 0 and Shift_OE should be 1)
+//--wait 300
+//--Pulse Shift_Latch
+//--Shift_OE = 0, Buff_OE= 1, Buff_S = 0 (all at same time)
+//--Wait 300
+//--Shift_OE = 1, Buff_OE = 0 (all at same time)
+//Low wait time will be automatic while next SPI loads
+//NOTE: Shift_OE = 1, Buff_OE = 0, Buff_S = 0 (all at same time) should be done to drive line low for initial condition
+void output_column()
+{
+    // #ifdef DEBUG
+    //     //This will screw up the timing
+    //     printf("%02x, %02x, %02x, %02x, %02x, %02x\n", frame_col_data[0], frame_col_data[1], frame_col_data[2], frame_col_data[3], frame_col_data[4], frame_col_data[5]);
+    // #endif
+
+    //Set up for the WS2812b timings
+    
+     
+    spi_write_blocking(spi1, frame_col_data, 6);
+    gpio_put_masked(oe_s_mask, buff_oe_hi); //set buffer output high and wait 300ns 
+    sleep_100ns();
+    // sleep_100ns();
+    // sleep_100ns();
+    
+    //Pulse latch
+    gpio_put(SHIFT_LATCH_GPIO, 1);
+    sleep_40ns();
+    gpio_put(SHIFT_LATCH_GPIO, 0);
+
+    gpio_put_masked(oe_s_mask, shift_oe); //disable buffer output and enable shift output (and set buff output to 0 ), and wait 300ns
+    sleep_100ns();
+    sleep_100ns();
+    // sleep_100ns();
+    gpio_put_masked(oe_s_mask, buff_oe_lo); //enable buffer output and disable shift output
+        
+    // // dma_start_channel_mask(spi1_dma_channel);
+    // spi_write_blocking(spi1, col_data, 6);
+    // //wait for about 150-200ns.
+    // sleep_100ns();
+    
+    // //  This is so this function can be called immediately after the previous run
+    // //  This is a total of approx. 300ns of low period before the next byte
+    // //pulse latch pin
+    // gpio_put(SHIFT_LATCH_GPIO, 1);
+    // sleep_100ns();
+    // gpio_put(SHIFT_LATCH_GPIO, 0);
+
+    // //set oe pin low. All outputs should turn on
+    // gpio_put(SHIFT_OE_GPIO, 0);
+    // // dma_channel_wait_for_finish_blocking(spi1_dma_channel);
+    // //---
+
+    // //--Second part of bit: the actual data
+    // col_data = frame_col_data;
+    // // dma_start_channel_mask(spi1_dma_channel);
+    // spi_write_blocking(spi1, col_data, 6);
+    // //wait for about 150-200ns (this wait is for the first hi part of the bit)
+    // sleep_100ns();
+    // sleep_100ns();
+
+    // //pulse latch pin
+    // //Since the OE is already low(enabled), this latch should show up on the outputs
+    // //of the shift registers immediately 
+    // //And wait about 200ns
+    // gpio_put(SHIFT_LATCH_GPIO, 1);
+    // sleep_100ns();
+    // gpio_put(SHIFT_LATCH_GPIO, 0);    
+    // sleep_100ns();
+    // //---
+
+    // //--Third part of bit: the low part of the bit
+    // //set oe pin hi (disable outputs)
+    // //the wait will happen when this function is called again
+    // gpio_put(SHIFT_OE_GPIO, 1);
+    //---
+
+    
+}
+
+void output_left_blank(uint8_t len)
+{
+    frame_col_data[0] = 0;
+    frame_col_data[1] = 0;
+    frame_col_data[2] = 0;
+    frame_col_data[3] = 0;
+    frame_col_data[4] = 0;
+    frame_col_data[5] = 0;
+
+    for(uint16_t i = 0; i < (len * 8 * 3); i++)
+    {
+        output_column();
+    }
+}
+
+void shift_next_bits(uint8_t col_and_color, uint8_t width, uint8_t bit)
+{
+    uint8_t mask = 1 << bit;
+    uint16_t i = col_and_color;
+    uint8_t offset = width * 3; // * 3 for 3 bytes per pixel (rgb)
+
+    //Gotta clear the frame_col_data buffer or we will just keep adding data to it 
+    frame_col_data[0] = 0;
+    frame_col_data[1] = 0;
+    frame_col_data[2] = 0;
+    frame_col_data[3] = 0;
+    frame_col_data[4] = 0;
+    frame_col_data[5] = 0;
+
+    for (uint8_t b = 0; b < 6; b++)
+    {
+        frame_col_data[b] |= (output_buff[i] & mask) ? 0x01 : 0;
+        i += offset;
+        frame_col_data[b] |= (output_buff[i] & mask) ? 0x02 : 0;
+        i += offset;
+        frame_col_data[b] |= (output_buff[i] & mask) ? 0x04 : 0;
+        i += offset;
+        frame_col_data[b] |= (output_buff[i] & mask) ? 0x08 : 0;
+        i += offset;
+        frame_col_data[b] |= (output_buff[i] & mask) ? 0x10 : 0;
+        i += offset;
+        frame_col_data[b] |= (output_buff[i] & mask) ? 0x20 : 0;
+        i += offset;
+        frame_col_data[b] |= (output_buff[i] & mask) ? 0x40 : 0;
+        i += offset;
+        frame_col_data[b] |= (output_buff[i] & mask) ? 0x80 : 0;
+        i += offset;
+    }
+
+    output_column();
+}
+
+//call on core1
+void draw_screen()
+{
+    uint8_t width = cur_gif->width * 3;
+    
+#ifdef DEBUG
+    printf("drawing left blank\n");
+#endif
+
+    output_left_blank((80 - cur_gif->width) / 2);
+
+#ifdef DEBUG
+    printf("drawing frame\n");
+#endif
+
+    gpio_put_masked(oe_s_mask, buff_oe_lo); //init to Shift_OE = 1, Buff_OE = 0, Buff_S = 0
+
+    for (uint16_t c = 0; c < width; c++)
+    {   
+        shift_next_bits(c, width, 0);
+        shift_next_bits(c, width, 1);
+        shift_next_bits(c, width, 2);
+        shift_next_bits(c, width, 3);
+        shift_next_bits(c, width, 4);
+        shift_next_bits(c, width, 5);
+        shift_next_bits(c, width, 6);
+        shift_next_bits(c, width, 7);
+    }
+    multicore_reset_core1();
+}
+
+void clear_screen()
+{
+    frame_col_data[0] = 0;
+    frame_col_data[1] = 0;
+    frame_col_data[2] = 0;
+    frame_col_data[3] = 0;
+    frame_col_data[4] = 0;
+    frame_col_data[5] = 0;
+
+#ifdef DEBUG
+    printf("Clearing screen\n");
+#endif  
+
+    for(uint16_t i = 0; i < (80 * 8 * 3); i++)
+    {
+        output_column();
+    }
+}
+
+void gif_load()
+{
+    FRESULT fr;
+
+    while(1)
+    {
+
+
+        if (dir.pat[0] == 0)
+        {
+#ifdef DEBUG
+    printf("finding first gif file\n");
+#endif  
+            fr = f_findfirst(&dir, &fno, "/", "*.gif");
+
+            if (fr != FR_OK)
+            {
+                printf("Could not find gifs: \n\t%s (%d)\n", FRESULT_str(fr), fr);
+                panic("Could not find any gifs.");
+            }
+        }
+        else 
+        {
+#ifdef DEBUG
+    printf("finding next gif file\n");
+#endif  
+
+            f_findnext(&dir, &fno);
+
+            if (fr != FR_OK)
+            {
+                printf("Could not find more gifs: \n\t%s (%d)\n", FRESULT_str(fr), fr);
+                panic("Could not find more gifs.");
+            }
+
+            if (fno.fname[0] == 0)
+            {
+                //No more files were found. Start over
+                dir.pat = "";
+                continue;
+            }
+        }
+        
+#ifdef DEBUG
+    printf("gif %s found\n", fno.fname);    
+#endif
+
+        if (cur_gif)
+        {
+            gd_close_gif(cur_gif);
+        }
+
+        fr = f_open(&fp, fno.fname, FA_READ);
+
+        if (fr != FR_OK)
+        {
+            printf("Could not open file %s\n\t%s (%d)\n", FRESULT_str(fr), fr);
+            printf("could not open file %s\n", fno.fname);
+            continue;
+        }
+
+        cur_gif = gd_open_gif(&fp);
+
+
+
+        if (cur_gif)
+        {
+#ifdef DEBUG
+    printf("gif opened\n");
+#endif
+
+            if (fill_buff)
+            {
+                free(fill_buff);
+            }
+
+            if (output_buff)
+            {
+                free(output_buff);
+            }
+
+            fill_buff = (uint8_t *)malloc(cur_gif->width * cur_gif->height * 3);
+            output_buff = (uint8_t *)malloc(cur_gif->width * cur_gif->height * 3);
+
+#ifdef DEBUG
+    printf("buffs created. Size: %d\n", cur_gif->width * cur_gif->height * 3);
+#endif
+
+            ssd1306_clear_square(&disp, 0, 8, 128, 32);
+            ssd1306_draw_string(&disp, 0, 8, 1, fno.fname);
+            ssd1306_show(&disp);            
+            break;
+        }
+    }
+}
+
+void get_next_frame()
+{
+    uint8_t * temp;
+    if (gd_get_frame(cur_gif))
+    {
+        gd_rewind(cur_gif);
+        gd_get_frame(cur_gif);
+    }
+
+    gd_render_frame(cur_gif, fill_buff);
+    //May have to subtract 1 from frame_delay_count first
+    frame_delay_count = cur_gif->gce.delay;
+
+    //swap pointers
+    temp = fill_buff;
+    fill_buff = output_buff;
+    output_buff = temp;
+
+    multicore_launch_core1(draw_screen);
+#ifdef DEBUG
+    printf("ready to prep next frame\n");
+#endif  
+}
+
+//Reset the long counter
+//Clear the screen
+//Get the next gif from the SD and open it
+//TODO: Start the timer (maybe)
+void gif_animation_init()
+{    
+    gif_cycle_count = GIF_CYCLE_MS;
+    
+    gif_load();
+    clear_screen();
+    frame_delay_count = 0; //start immediately
+}
+
+void frame_handler()
+{
+    //TODO button debounce
+
+#ifdef DEBUG
+
+    // f_findfirst(&dir, &fno, "/", "*.gif");
+    // printf("first gif: %s\n", fno.fname);
+    // f_open(&fp, fno.fname, FA_READ);
+    // printf("file opened. size: %d\n", fp.obj.fs->fsize);
+    // cur_gif = gd_open_gif(&fp);
+    // printf("gif open: w: %d, h: %d\n", cur_gif->width, cur_gif->height);
+    printf("Alarm handler running. cycle count: %d, frame count: %d\n", gif_cycle_count, frame_delay_count);
+    // return;
+#endif
+
+    if (gif_cycle_count == 0)
+    {
+        gif_cycle_count = GIF_CYCLE_MS;
+#ifdef DEBUG
+    printf("starting gif animation. %d\n", fno.fname[0]);
+#endif        
+        gif_animation_init();
+        get_next_frame();
+        return;
+    }
+
+    gif_cycle_count -= 10; //this is a 10ms timer
+    //TODO: show time left on cycle on OLED
+
+    if (frame_delay_count == 0)
+    {
+        get_next_frame();
+
+    }
+
+    frame_delay_count--;
+
+}
+
+
+
+bool frame_alarm_cb(repeating_timer_t * fa)
+{
+    //Instead of calling the code to run the next frame here, a flag
+    //is set that is handled in the main loop. This is because of
+    //issues running the SPI and I2C from within the callback.
+    process_next_frame = true;
+    return false;
+
+    return true;
+}
+
+int main() {
+    set_sys_clock_khz(PICO_CLK_KHZ, true);
+
+    stdio_init_all();
+    display_i2c_init();    
+    io_init();
+    spi1_init();
+    spi1_dma_init();
+    display_init();
+    //TODO: show "Loading" message on OLED
+
+    ssd1306_draw_string(&disp, 0, 0, 1, "Loading");
+    ssd1306_show(&disp);
+sleep_ms(2000);
+
+    puts("Hello, world!");
+
+    // See FatFs - Generic FAT Filesystem Module, "Application Interface",
+    // http://elm-chan.org/fsw/ff/00index_e.html
+    sd_card_t *pSD = sd_get_by_num(0);
+    FRESULT fr = f_mount(&pSD->fatfs, pSD->pcName, 1);
+
+    if (fr != FR_OK)
+    {
+        //TODO: show error on OLED
+        printf("f_mount error: %s (%d)\n", FRESULT_str(fr), fr); 
+        return fr;
+    }
+    
+    fr = f_opendir(&dir, "/");
+
+    if (fr != FR_OK)
+    {
+        //TODO: show error on OLED
+        printf("f_opendir error: %s (%d)\n", FRESULT_str(fr), fr); 
+        return fr;
+    }
+
+    dir.pat = "";
+
+    //TODO: show "displaying gifs" message on OLED
+    ssd1306_clear_square(&disp, 0, 0, 128, 32);
+    ssd1306_draw_string(&disp, 0, 0, 1, "displaying gifs");
+    ssd1306_show(&disp);
+
+
+    //Start the timer and let it run
+    alarm_init();
+    
+/*
+
+    if (FR_OK != fr) panic("f_mount error: %s (%d)\n", FRESULT_str(fr), fr);
+    FIL fil;
+    const char* const filename = "filename.txt";
+    fr = f_open(&fil, filename, FA_OPEN_APPEND | FA_WRITE);
+    if (FR_OK != fr && FR_EXIST != fr)
+        panic("f_open(%s) error: %s (%d)\n", filename, FRESULT_str(fr), fr);
+    if (f_printf(&fil, "Hello, world!\n") < 0) {
+        printf("f_printf failed\n");
+    }
+
+    DIR dir;
+    
+
+    if (fr != FR_OK) {
+        printf("f_opendir error: %s (%d)\n", FRESULT_str(fr), fr);        
+    }
+    else {
+
+        FILINFO fno;
+
+        f_findfirst(&dir, &fno, "/", "*.gif");
+
+        if (fno.fname[0] != 0)
+        {
+            gd_GIF *gif;
+            FIL fp;
+           
+            fr = f_open(&fp, fno.fname, FA_READ);
+            
+            if (fr != FR_OK)
+            {
+                printf("Could not open file: %s\n\t%s (%d)\n", fno.fname, FRESULT_str(fr), fr);
+            }
+            else
+            {
+                 printf("Opening %s\n", fno.fname);
+                gif = gd_open_gif(&fp);
+
+                if (!gif)
+                {
+                    printf("Could not open gif.\n");
+                }
+                else
+                {
+                    printf("w: %d, h: %d\n", gif->width, gif->height);
+                    uint8_t *buffer = (uint8_t*)malloc(gif->width * gif->height * 3);
+                    uint16_t frame_i = 0;
+                    for (uint16_t looped = 1;; looped++) {
+                        frame_i = 0;
+                        while (gd_get_frame(gif)) {
+                            gd_render_frame(gif, buffer);
+
+                            printf("frame %d\n", frame_i++);
+                            sleep_ms(gif->gce.delay * 10);
+                        }
+                        if (looped == gif->loop_count)
+                            break;
+                        gd_rewind(gif);
+                    }
+                    free(buffer);
+                    gd_close_gif(gif);
+                }
+
+            }
+
+            // gd_open_gif()
+        }
+
+        // while(fno.fname[0] != 0)
+        // {
+        //     printf("\tgif: %s\n", fno.fname); // Print File Name
+        //     f_findnext(&dir, &fno);
+        // }
+            
+    }
+
+    fr = f_close(&fil);
+    if (FR_OK != fr) {
+        printf("f_close error: %s (%d)\n", FRESULT_str(fr), fr);
+    }
+    f_unmount(pSD->pcName);
+
+    puts("Goodbye, world!");
+    */
+    while(1)
+    {
+        if (process_next_frame)
+        {
+            process_next_frame = false;
+            frame_handler();
+        }
+    }
+}
